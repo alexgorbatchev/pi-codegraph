@@ -130,3 +130,116 @@ test("rejects a legacy CodeGraph symlink with an unsupported metadata version", 
     /Refusing to replace an unmanaged \.codegraph symlink/,
   );
 });
+
+test("replaces a dangling managed CodeGraph symlink pointing to the managed index store", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-codegraph-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const sourcePath = path.join(root, "project");
+  const managedStore = path.join(root, "managed");
+  const nonExistentManagedTarget = path.join(
+    managedStore,
+    "projects",
+    "stale-hash",
+  );
+  await mkdir(sourcePath);
+  await mkdir(path.join(managedStore, "projects"), { recursive: true });
+  await symlink(
+    nonExistentManagedTarget,
+    path.join(sourcePath, ".codegraph"),
+    "dir",
+  );
+
+  const manager = new WorkspaceManager({
+    ...defaultSettings,
+    autoSync: false,
+    autoGc: false,
+    indexStore: managedStore,
+  });
+  const prepared = await manager.prepare({
+    sourcePath,
+    repoRoot: sourcePath,
+    repoIdentity: "repo-identity",
+    worktreeIdentity: "worktree-identity",
+    gitCommonDir: "",
+  });
+
+  assert.equal(prepared.state, "ready");
+  assert.equal(prepared.managed, true);
+  const linkTarget = await realpath(path.join(sourcePath, ".codegraph"));
+  assert.equal(linkTarget, prepared.indexPath);
+});
+
+test("rejects a dangling unmanaged CodeGraph symlink pointing outside the managed index store", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-codegraph-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const sourcePath = path.join(root, "project");
+  const managedStore = path.join(root, "managed");
+  const nonExistentOutsideTarget = path.join(root, "other-external", "deleted");
+  await mkdir(sourcePath);
+  await symlink(
+    nonExistentOutsideTarget,
+    path.join(sourcePath, ".codegraph"),
+    "dir",
+  );
+
+  const manager = new WorkspaceManager({
+    ...defaultSettings,
+    autoSync: false,
+    autoGc: false,
+    indexStore: managedStore,
+  });
+
+  await assert.rejects(
+    manager.prepare({
+      sourcePath,
+      repoRoot: sourcePath,
+      repoIdentity: "repo-identity",
+      worktreeIdentity: "worktree-identity",
+      gitCommonDir: "",
+    }),
+    /Refusing to replace an unmanaged \.codegraph symlink/,
+  );
+});
+
+test("gc cleans up project symlinks pointing to deleted stale managed indices", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-codegraph-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const sourcePath = path.join(root, "project");
+  const managedStore = path.join(root, "managed");
+  const projectIndexPath = path.join(managedStore, "projects", "stale-key");
+  await mkdir(sourcePath);
+  await mkdir(projectIndexPath, { recursive: true });
+  await writeFile(
+    path.join(projectIndexPath, ".pi-codegraph.json"),
+    JSON.stringify({
+      managed: true,
+      sourcePath,
+      repoIdentity: "old-repo",
+      worktreeIdentity: "old-worktree",
+    }),
+  );
+  await symlink(projectIndexPath, path.join(sourcePath, ".codegraph"), "dir");
+
+  const manager = new WorkspaceManager({
+    ...defaultSettings,
+    autoSync: false,
+    autoGc: false,
+    indexStore: managedStore,
+  });
+
+  const gcResult = await manager.gc(new Set(), true);
+  assert.equal(gcResult.removed.length, 1);
+  assert.equal(gcResult.removed[0], projectIndexPath);
+
+  // Symlink in project directory should have been cleaned up by gc
+  let linkExists = true;
+  try {
+    await readlink(path.join(sourcePath, ".codegraph"));
+  } catch {
+    linkExists = false;
+  }
+  assert.equal(linkExists, false);
+});

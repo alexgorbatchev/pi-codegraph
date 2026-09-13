@@ -7,6 +7,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  readlink,
   realpath,
   rename,
   rm,
@@ -385,6 +386,14 @@ async function exists(input: string): Promise<boolean> {
   }
 }
 
+async function resolvePathSafe(inputPath: string): Promise<string> {
+  try {
+    return await realpath(inputPath);
+  } catch {
+    return resolve(inputPath);
+  }
+}
+
 async function readMetadata(
   indexPath: string,
 ): Promise<IndexMetadata | undefined> {
@@ -540,14 +549,40 @@ export class WorkspaceManager {
         }
         if (target === managedIndex)
           return { indexPath: managedIndex, managed: true };
+
+        const rawLink = await readlink(linkPath);
+        const linkTarget = resolve(dirname(linkPath), rawLink);
+        const resolvedLinkTarget = await resolvePathSafe(linkTarget);
+        const resolvedManagedIndex = await resolvePathSafe(managedIndex);
+        const resolvedIndexStore = await resolvePathSafe(
+          this.settings.indexStore,
+        );
+        const resolvedSourcePath = await resolvePathSafe(identity.sourcePath);
+
+        const pointsToManagedStore =
+          linkTarget === managedIndex ||
+          resolvedLinkTarget === resolvedManagedIndex ||
+          isWithin(linkTarget, this.settings.indexStore) ||
+          isWithin(resolvedLinkTarget, resolvedIndexStore);
+
         const metadata = target ? await readMetadata(target) : undefined;
-        if (metadata?.managed && metadata.sourcePath === identity.sourcePath) {
+        const metadataSourcePath = metadata?.sourcePath
+          ? await resolvePathSafe(metadata.sourcePath)
+          : undefined;
+
+        if (
+          metadata?.managed &&
+          (metadata.sourcePath === identity.sourcePath ||
+            metadataSourcePath === resolvedSourcePath)
+        ) {
           await rm(linkPath, { force: true });
         } else if (
           target &&
-          (await readIndexedSourcePath(target)) === identity.sourcePath
+          (await readIndexedSourcePath(target)) === resolvedSourcePath
         ) {
           return { indexPath: target, managed: false };
+        } else if (pointsToManagedStore) {
+          await rm(linkPath, { force: true });
         } else {
           throw new Error(
             `Refusing to replace an unmanaged .codegraph symlink at ${identity.sourcePath}`,
@@ -665,6 +700,27 @@ export class WorkspaceManager {
         }
       }
       if (stale) {
+        const projectSourcePath = metadata?.sourcePath;
+        if (projectSourcePath) {
+          try {
+            const projectLink = join(projectSourcePath, ".codegraph");
+            const linkStat = await lstat(projectLink);
+            if (linkStat.isSymbolicLink()) {
+              const rawTarget = await readlink(projectLink);
+              const linkTarget = resolve(projectSourcePath, rawTarget);
+              const resolvedLinkTarget = await resolvePathSafe(linkTarget);
+              const resolvedIndexPath = await resolvePathSafe(indexPath);
+              if (
+                linkTarget === indexPath ||
+                resolvedLinkTarget === resolvedIndexPath
+              ) {
+                await rm(projectLink, { force: true });
+              }
+            }
+          } catch {
+            // Ignore if sourcePath or symlink does not exist.
+          }
+        }
         await rm(indexPath, { recursive: true, force: true });
         removed.push(indexPath);
       }
