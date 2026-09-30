@@ -97,8 +97,9 @@ export class JsonRpcPeer {
 
   #onData(chunk: Buffer | string): void {
     this.buffer += chunk.toString("utf8");
-    let newline = this.buffer.indexOf("\n");
-    while (newline !== -1) {
+    while (true) {
+      const newline = this.buffer.indexOf("\n");
+      if (newline === -1) break;
       const line = this.buffer.slice(0, newline).trim();
       this.buffer = this.buffer.slice(newline + 1);
       if (!line) continue;
@@ -126,7 +127,6 @@ export class JsonRpcPeer {
       } else {
         pending.finish(undefined, message.result);
       }
-      newline = this.buffer.indexOf("\n");
     }
   }
 }
